@@ -1,6 +1,11 @@
 version: '3.6'
 services:
 
+  nginx:
+    ports:
+      - "443:443"
+      - "80:80"
+
   celery-worker:
     environment:
       - WES_CONFIG=/app/wes_elixir/config/app_config.dev.yaml

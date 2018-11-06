@@ -1,6 +1,16 @@
 version: '3.6'
 services:
 
+  nginx:
+    image: nginx:latest
+    restart: always
+    links:
+      - wes-elixir
+      - celery-worker
+    volumes:
+      - ../data/nginx/etc/ssl/:/etc/ssl/
+      - ../data/nginx/etc/nginx/conf.d/:/etc/nginx/conf.d
+
   celery-worker:
     image: wes-elixir:latest
     build:
