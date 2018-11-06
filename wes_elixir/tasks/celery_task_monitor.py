@@ -1,14 +1,21 @@
+"""Celery task monitor, event handlers and related utility functions."""
+
 from ast import literal_eval
 from datetime import datetime
-import json
 import logging
 import os
 import re
 import requests
 from shlex import quote
-import traceback
 from threading import Thread
 from time import sleep
+from typing import (Dict, List, Optional)
+
+from celery import Celery
+from celery.events import Event
+from celery.events.receiver import EventReceiver
+from kombu.connection import Connection  # noqa: F401
+from pymongo import collection as Collection
 
 import wes_elixir.database.db_utils as db_utils
 
@@ -17,74 +24,99 @@ import wes_elixir.database.db_utils as db_utils
 logger = logging.getLogger(__name__)
 
 
+# Set string time format
+strf: str = '%Y-%m-%d %H:%M:%S.%f'
+
+
 class TaskMonitor():
-    '''Celery task monitor'''
+    """Celery task monitor."""
 
     def __init__(
         self,
-        celery_app=None,
-        collection=None,
-        timeout=0,
-        authorization=True,
-        tes=None,
-    ):
-
-        '''Start Celery task monitor daemon process'''
-
+        celery_app: Celery,
+        collection: Collection,
+        tes_config: Dict[str, str],
+        timeout: float = 0,
+        authorization: bool = True,
+    ) -> None:
+        """Starts Celery task monitor daemon process."""
         self.celery_app = celery_app
         self.collection = collection
         self.timeout = timeout
         self.authorization = authorization
-        self.tes = tes
+        self.tes_config = tes_config
 
         self.thread = Thread(target=self.run, args=())
         self.thread.daemon = True
         self.thread.start()
 
-        logger.debug("Celery task monitor daemon process started...")
+        logger.debug('Celery task monitor daemon process started...')
 
-
-    def run(self):
-        '''Daemon process for Celery task monitor'''
-
+    def run(self) -> None:
+        """Daemon process for Celery task monitor."""
         while True:
 
             try:
 
-                with self.celery_app.connection() as connection:
+                with self.celery_app.connection() as \
+                     connection:  # type: Connection
 
-                    listener = self.celery_app.events.Receiver(connection, handlers={
-                        'task-failed'    : self.on_task_failed,
-                        'task-received'  : self.on_task_received,
-                        'task-revoked'   : self.on_task_revoked,
-                        'task-started'   : self.on_task_started,
-                        'task-succeeded' : self.on_task_succeeded
-                    })
+                    listener: EventReceiver = self.celery_app.events.Receiver(
+                        connection,
+                        handlers={
+                            'task-failed':
+                                self.on_task_failed,
+                            'task-received':
+                                self.on_task_received,
+                            'task-revoked':
+                                self.on_task_revoked,
+                            'task-started':
+                                self.on_task_started,
+                            'task-succeeded':
+                                self.on_task_succeeded,
+                            'task-tes-task-update':
+                                self.on_task_tes_task_update,
+                        }
+                    )
                     listener.capture(limit=None, timeout=None, wakeup=True)
 
             except KeyboardInterrupt as e:
-                logger.critical("Task monitor interrupted. Execution aborted. Original error message: {type}: {msg}".format(
-                    type=type(e).__name__,
-                    msg=e,
-                ))
+                logger.exception(
+                    (
+                        'Task monitor interrupted. Execution aborted. '
+                        'Original error message: {type}: {msg}'
+                    ).format(
+                        type=type(e).__name__,
+                        msg=e,
+                    )
+                )
                 raise SystemExit
 
             except Exception as e:
-                logger.exception("Unknown error in task monitor occurred. Execution aborted.")
-                raise SystemExit
+                logger.exception(
+                    (
+                        'Unknown error in task monitor occurred. Original '
+                        'error message: {type}: {msg}'
+                    ).format(
+                        type=type(e).__name__,
+                        msg=e,
+                    )
+                )
+                pass
 
             # Sleep for specified interval
             sleep(self.timeout)
 
-
-    ### STATE: SYSTEM_ERROR ###
-    def on_task_failed(self, event):
-
-        '''Event handler for failed (system error) Celery tasks'''
-
+    def on_task_failed(
+        self,
+        event: Event
+    ) -> None:
+        """Event handler for failed (system error) Celery tasks."""
         # Create dictionary for internal parameters
         internal = dict()
-        internal['task_finished'] = datetime.utcfromtimestamp(event['timestamp'])
+        internal['task_finished'] = datetime.utcfromtimestamp(
+            event['timestamp']
+        )
         internal['traceback'] = event['traceback']
 
         # Update run document in databse
@@ -92,34 +124,48 @@ class TaskMonitor():
             event=event,
             state='SYSTEM_ERROR',
             internal=internal,
-            task_finished=datetime.utcfromtimestamp(event['timestamp']).strftime("%Y-%m-%d %H:%M:%S.%f"),
+            task_finished=datetime.utcfromtimestamp(
+                event['timestamp']
+            ).strftime(strf),
             exception=event['exception'],
         )
 
-
-    ### STATE: QUEUED ###
-    def on_task_received(self, event):
-
-        '''Event handler for received Celery tasks'''
-
+    def on_task_received(
+        self,
+        event: Event
+    ) -> None:
+        """Event handler for received Celery tasks."""
         # Parse subprocess inputs
         try:
             kwargs = literal_eval(event['kwargs'])
-        except Exception:
-            logger.exception("Field 'kwargs' in event message malformed. Execution aborted. Original error message:")
-            raise SystemExit
+        except Exception as e:
+            logger.exception(
+                (
+                    "Field 'kwargs' in event message malformed. Original "
+                    'error message: {type}: {msg}'
+                ).format(
+                    type=type(e).__name__,
+                    msg=e,
+                )
+            )
+            pass
 
         # Build command
         if 'command_list' in kwargs:
-            if self.authorization: 
-                kwargs['command_list'][3] = kwargs['command_list'][5] = '<REDACTED>'
-            command = ' '.join([quote(item) for item in kwargs['command_list']])
+            if self.authorization:
+                kwargs['command_list'][3] = '<REDACTED>'
+                kwargs['command_list'][5] = '<REDACTED>'
+            command = ' '.join(
+                [quote(item) for item in kwargs['command_list']]
+            )
         else:
             command = 'N/A'
 
         # Create dictionary for internal parameters
         internal = dict()
-        internal['task_received'] = datetime.utcfromtimestamp(event['timestamp'])
+        internal['task_received'] = datetime.utcfromtimestamp(
+            event['timestamp']
+        )
         internal['process_id'] = event['pid']
         internal['host'] = event['hostname']
 
@@ -129,29 +175,37 @@ class TaskMonitor():
                 event=event,
                 state='QUEUED',
                 internal=internal,
-                task_received=datetime.utcfromtimestamp(event['timestamp']).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                task_received=datetime.utcfromtimestamp(
+                    event['timestamp']
+                ).strftime(strf),
                 command=command,
                 utc_offset=event['utcoffset'],
                 max_retries=event['retries'],
                 expires=event['expires'],
             )
         except Exception as e:
-            logger.error("Database error. Could not update log information for task {task}. Original error message: {type}: {msg}".format(
-                task=event['uuid'],
-                type=type(e).__name__,
-                msg=e,
-            ))
+            logger.exception(
+                (
+                    'Database error. Could not update log information for '
+                    "task '{task}'. Original error message: {type}: {msg}"
+                ).format(
+                    task=event['uuid'],
+                    type=type(e).__name__,
+                    msg=e,
+                )
+            )
             pass
 
-
-    ### STATE: CANCELED ###
-    def on_task_revoked(self, event):
-
-        '''Event handler for revoked Celery tasks'''
-
+    def on_task_revoked(
+        self,
+        event: Event
+    ) -> None:
+        """Event handler for revoked Celery tasks."""
         # Create dictionary for internal parameters
         internal = dict()
-        internal['task_finished'] = datetime.utcfromtimestamp(event['timestamp'])
+        internal['task_finished'] = datetime.utcfromtimestamp(
+            event['timestamp']
+        )
         internal['signal_number'] = event['signum']
         internal['terminated'] = event['terminated']
 
@@ -161,26 +215,34 @@ class TaskMonitor():
                 event=event,
                 state='CANCELED',
                 internal=internal,
-                task_finished=datetime.utcfromtimestamp(event['timestamp']).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                task_finished=datetime.utcfromtimestamp(
+                    event['timestamp']
+                ).strftime(strf),
                 expired=event['expired'],
             )
         except Exception as e:
-            logger.error("Database error. Could not update log information for task {task}. Original error message: {type}: {msg}".format(
-                task=event['uuid'],
-                type=type(e).__name__,
-                msg=e,
-            ))
+            logger.exception(
+                (
+                    'Database error. Could not update log information for '
+                    "task '{task}'. Original error message: {type}: {msg}"
+                ).format(
+                    task=event['uuid'],
+                    type=type(e).__name__,
+                    msg=e,
+                )
+            )
             pass
 
-
-    ### STATE: RUNNING ###
-    def on_task_started(self, event):
-
-        '''Event handler for started Celery tasks'''
-
+    def on_task_started(
+        self,
+        event: Event
+    ) -> None:
+        """Event handler for started Celery tasks."""
         # Create dictionary for internal parameters
         internal = dict()
-        internal['task_started'] = datetime.utcfromtimestamp(event['timestamp'])
+        internal['task_started'] = datetime.utcfromtimestamp(
+            event['timestamp']
+        )
 
         # Update run document in database
         try:
@@ -188,48 +250,65 @@ class TaskMonitor():
                 event=event,
                 state='RUNNING',
                 internal=internal,
-                task_started=datetime.utcfromtimestamp(event['timestamp']).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                task_started=datetime.utcfromtimestamp(
+                    event['timestamp']
+                ).strftime(strf),
             )
         except Exception as e:
-            logger.error("Database error. Could not update log information for task {task}. Original error message: {type}: {msg}".format(
-                task=event['uuid'],
-                type=type(e).__name__,
-                msg=e,
-            ))
+            logger.exception(
+                (
+                    'Database error. Could not update log information for '
+                    "task '{task}'. Original error message: {type}: {msg}"
+                ).format(
+                    task=event['uuid'],
+                    type=type(e).__name__,
+                    msg=e,
+                )
+            )
             pass
 
-
-    ### STATE: EXECUTOR_ERROR / COMPLETE ###
-    def on_task_succeeded(self, event):
-
-        '''Event handler for successful and failed (executor error) Celery tasks'''
-
+    def on_task_succeeded(
+        self,
+        event: Event
+    ) -> None:
+        """Event handler for successful and failed (`EXECUTOR_ERROR`) Celery
+        tasks."""
         # Parse subprocess results
-        # NOTE: Hack to get around serialization/deserialization problem
         try:
-            (returncode, stdout, stderr) = event['result'].strip('\'').split('<<<newfield>>>')
-            returncode = int(returncode.strip('\''))
-            stdout = stdout.strip('\'').split('<<<newline>>>')
-            stderr = stderr.strip('\'').split('<<<newline>>>')
-        except Exception:
-            logger.exception("Field 'result' in event message malformed. Execution aborted. Original error message:")
-            raise SystemExit
+            (returncode, log, tes_ids) = literal_eval(event['result'])
+            log = os.linesep.join(log)
+        except Exception as e:
+            logger.exception(
+                (
+                    "Field 'result' in event message malformed. Original "
+                    'error message: {type}: {msg}'
+                ).format(
+                    type=type(e).__name__,
+                    msg=e,
+                )
+            )
+            pass
 
         # Create dictionary for internal parameters
         internal = dict()
-        internal['task_finished'] = datetime.utcfromtimestamp(event['timestamp'])
+        internal['task_finished'] = datetime.utcfromtimestamp(
+            event['timestamp']
+        )
 
         # Set state depending on return code
         if returncode:
-            state='EXECUTOR_ERROR'
+            state = 'EXECUTOR_ERROR'
         else:
-            state='COMPLETE'
+            state = 'COMPLETE'
 
         # Extract run outputs
-        outputs = self.__cwl_tes_outputs_parser(stdout)
+        import pickle
+        with open('/home/kanitz/log.pkl', 'wb') as output:
+            pickle.dump(log, output, pickle.HIGHEST_PROTOCOL)
+        outputs = self.__cwl_tes_outputs_parser(log)
 
         # Get task logs
-        task_logs = self.__get_task_logs(stderr)
+        task_logs = self.__get_tes_task_logs(tes_ids=tes_ids)
 
         # Update run document in database
         try:
@@ -239,40 +318,94 @@ class TaskMonitor():
                 internal=internal,
                 outputs=outputs,
                 task_logs=task_logs,
-                task_finished=datetime.utcfromtimestamp(event['timestamp']).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                task_finished=datetime.utcfromtimestamp(
+                    event['timestamp']
+                ).strftime(strf),
                 return_code=returncode,
-                stdout=os.linesep.join(stdout),
-                stderr=os.linesep.join(stderr),
+                stdout=log,
+                stderr='',
             )
         except Exception as e:
-            logger.error("Database error. Could not update log information for task {task}. Original error message: {type}: {msg}".format(
-                task=event['uuid'],
-                type=type(e).__name__,
-                msg=e,
-            ))
+            logger.exception(
+                (
+                    'Database error. Could not update log information for '
+                    "task '{task}'. Original error message: {type}: {msg}"
+                ).format(
+                    task=event['uuid'],
+                    type=type(e).__name__,
+                    msg=e,
+                )
+            )
             pass
 
+    def on_task_tes_task_update(
+        self,
+        event: Event
+    ) -> None:
+        """Event handler for TES task state changes."""
+        # If TES task is new, add task log to database
+        if not event['tes_state']:
+            try:
+                tes_log = self.__get_tes_task_log(tes_id=event['tes_id'])
+                db_utils.append_to_tes_task_logs(
+                    collection=self.collection,
+                    task_id=event['uuid'],
+                    tes_log=tes_log,
+                )
+            except Exception as e:
+                logger.exception(
+                    (
+                        'Database error. Could not update log information for '
+                        "task '{task}'. Original error message: {type}: {msg}"
+                    ).format(
+                        task=event['uuid'],
+                        type=type(e).__name__,
+                        msg=e,
+                    )
+                )
+                pass
+
+        # Otherwise only update state
+        else:
+            try:
+                db_utils.update_tes_task_state(
+                    collection=self.collection,
+                    task_id=event['uuid'],
+                    tes_id=event['tes_id'],
+                    state=event['tes_state'],
+                )
+            except Exception as e:
+                logger.exception(
+                    (
+                        'Database error. Could not update log information for '
+                        "task '{task}'. Original error message: {type}: {msg}"
+                    ).format(
+                        task=event['uuid'],
+                        type=type(e).__name__,
+                        msg=e,
+                    )
+                )
+                pass
 
     def update_run_document(
         self,
-        event,
-        state='UNKNOWN',
-        internal=None,
-        outputs=None,
-        task_logs=None,
+        event: Event,
+        state: Optional[str] = None,
+        internal: Optional[Dict] = None,
+        outputs: Optional[Dict] = None,
+        task_logs: Optional[List[Dict]] = None,
         **run_log_params
     ):
-
-        '''Update state, internal and run log parameters'''
-
+        """Updates state, internal and run log parameters in database
+        document.
+        """
         # TODO: Minimize db ops; try to compile entire object & update once
-
         # Update internal parameters
         if internal:
             document = db_utils.upsert_fields_in_root_object(
                 collection=self.collection,
                 task_id=event['uuid'],
-                root="internal",
+                root='internal',
                 **internal,
             )
 
@@ -281,7 +414,7 @@ class TaskMonitor():
             document = db_utils.upsert_fields_in_root_object(
                 collection=self.collection,
                 task_id=event['uuid'],
-                root="api.outputs",
+                root='api.outputs',
                 **outputs,
             )
 
@@ -290,7 +423,7 @@ class TaskMonitor():
             document = db_utils.upsert_fields_in_root_object(
                 collection=self.collection,
                 task_id=event['uuid'],
-                root="api",
+                root='api',
                 task_logs=task_logs,
             )
 
@@ -299,99 +432,106 @@ class TaskMonitor():
             document = db_utils.upsert_fields_in_root_object(
                 collection=self.collection,
                 task_id=event['uuid'],
-                root="api.run_log",
+                root='api.run_log',
                 **run_log_params,
             )
 
         # Calculate queue, execution and run time
-        if document['internal']:
+        if document and document['internal']:
             run_log = document['internal']
             durations = dict()
 
             if 'task_started' in run_log_params:
                 if 'task_started' in run_log and 'task_received' in run_log:
                     pass
-                    durations['time_queue'] = (run_log['task_started'] - run_log['task_received']).total_seconds()
+                    durations['time_queue'] = (
+                        run_log['task_started'] - run_log['task_received']
+                    ).total_seconds()
 
             if 'task_finished' in run_log_params:
                 if 'task_finished' in run_log and 'task_started' in run_log:
                     pass
-                    durations['time_execution'] = (run_log['task_finished'] - run_log['task_started']).total_seconds()
+                    durations['time_execution'] = (
+                        run_log['task_finished'] - run_log['task_started']
+                    ).total_seconds()
                 if 'task_finished' in run_log and 'task_received' in run_log:
                     pass
-                    durations['time_total'] = (run_log['task_finished'] - run_log['task_received'] ).total_seconds()
+                    durations['time_total'] = (
+                        run_log['task_finished'] - run_log['task_received']
+                    ).total_seconds()
 
             if durations:
                 document = db_utils.upsert_fields_in_root_object(
                     collection=self.collection,
                     task_id=event['uuid'],
-                    root="api.run_log",
+                    root='api.run_log',
                     **durations,
                 )
 
         # Update state
-        try:
-            document = db_utils.update_run_state(
-                collection=self.collection,
-                task_id=event['uuid'],
-                state=state,
-            )
-        except Exception:
-            raise
+        if state:
+            try:
+                document = db_utils.update_run_state(
+                    collection=self.collection,
+                    task_id=event['uuid'],
+                    state=state,
+                )
+            except Exception:
+                raise
 
         # Log info message
-        logger.info("State of run '{run_id}' (task id: {task_id}) changed to '{state}'".format(
-            run_id=document['run_id'],
-            task_id=event['uuid'],
-            state=state,
-        ))
+        if document:
+            logger.info(
+                (
+                    "State of run '{run_id}' (task id: '{task_id}') changed "
+                    "to '{state}'."
+                ).format(
+                    run_id=document['run_id'],
+                    task_id=event['uuid'],
+                    state=state,
+                )
+            )
 
+        return document
 
     @staticmethod
-    def __cwl_tes_outputs_parser(lines):
+    def __cwl_tes_outputs_parser(log: str) -> Dict:
+        """Parses outputs from cwl-tes log."""
+        # Find outputs object in log string
+        re_outputs = re.compile(
+            r'(^\{$\n^ {4}"\S+": \{$\n(^ {4,}.*$\n)*^ {4}\}$\n^\}$\n)',
+            re.MULTILINE
+        )
+        m = re_outputs.search(log)
+        if m:
+            return literal_eval(m.group(1))
+        else:
+            return dict()
 
-        '''Parse outputs from CWL-TES log'''
-
-        # Convert block to dictionary
-        return literal_eval('\n'.join(lines))
-
-
-    def __get_task_logs(
+    def __get_tes_task_logs(
         self,
-        lines=None
-    ):
-
-        '''Parse task IDs from CWL-TES log and get logs from TES instance'''
-
-        # Set regular expressions
-        re_task = re.compile(r"^\[job\s\w*?\]\stask\sid:\s(\S*)\s*$")
-
-        # Set parameters
-        tasks = list()
+        tes_ids: List = list()
+    ) -> List:
+        """Gets multiple task logs from TES instance."""
         task_logs = list()
-
-        # Iterate over lines
-        for line in lines:
-
-            # Extract task ID when regex matches
-            m = re_task.match(line)
-            if m:
-                tasks.append(m.group(1))
-
-        # Iterate over task IDs
-        for task_id in tasks:
-
-            # Build URL
-            base = self.tes['url']
-            root = self.tes['logs_endpoint_root']
-            suffix = self.tes['logs_endpoint_query_params']
-            url = ''.join([base, root, task_id, suffix])
-
-            # Send GET request to URL
-            r = requests.get(url)
-
-            # Add log to container
-            task_logs.append(r.json())
-
-        # Return task logs container
+        for tes_id in tes_ids:
+            task_logs.append(self.__get_tes_task_log(tes_id))
         return task_logs
+
+    def __get_tes_task_log(
+        self,
+        tes_id: str
+    ) -> str:
+        """Gets task log from TES instance."""
+        # Build URL
+        base = self.tes_config['url']
+        root = self.tes_config['logs_endpoint_root']
+        suffix = ''.join(
+            [tes_id, self.tes_config['logs_endpoint_query_params']]
+        )
+        url = '/'.join(frag.strip('/') for frag in [base, root, suffix])
+
+        # Send GET request to URL to obtain task log
+        task_log = requests.get(url).json()
+
+        return task_log
