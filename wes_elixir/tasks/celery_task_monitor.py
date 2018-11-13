@@ -302,9 +302,9 @@ class TaskMonitor():
             state = 'COMPLETE'
 
         # Extract run outputs
-        import pickle
-        with open('/home/kanitz/log.pkl', 'wb') as output:
-            pickle.dump(log, output, pickle.HIGHEST_PROTOCOL)
+        #import pickle
+        #with open('/home/kanitz/log.pkl', 'wb') as output:
+        #    pickle.dump(log, output, pickle.HIGHEST_PROTOCOL)
         outputs = self.__cwl_tes_outputs_parser(log)
 
         # Get task logs
