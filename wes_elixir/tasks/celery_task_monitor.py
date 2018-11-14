@@ -46,11 +46,12 @@ class TaskMonitor():
         self.authorization = authorization
         self.tes_config = tes_config
 
-        self.thread = Thread(target=self.run, args=())
-        self.thread.daemon = True
-        self.thread.start()
 
-        logger.debug('Celery task monitor daemon process started...')
+        # self.thread = Thread(target=self.run, args=())
+        # self.thread.daemon = True
+        # self.thread.start()
+
+        # logger.debug('Celery task monitor daemon process started...')
 
     def run(self) -> None:
         """Daemon process for Celery task monitor."""

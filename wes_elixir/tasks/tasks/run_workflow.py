@@ -25,6 +25,10 @@ def task__run_workflow(
     tmp_dir: str
 ) -> Tuple[int, List[str], List[str]]:
     """Adds workflow run to task queue."""
+    # TODO: INITIALIZING....
+
+    # TODO: RUNNING
+
     # Execute task in background
     proc = subprocess.Popen(
         command_list,
@@ -33,10 +37,10 @@ def task__run_workflow(
         stderr=subprocess.STDOUT,
         universal_newlines=True,
     )
-    # Parse output in real-time
-    log, tes_ids = __process_cwl_logs(self, stream=proc.stdout)
 
     returncode = proc.wait()
+
+    # TODO: COMPLETE OR EXECUTOR ERROR
 
     return (returncode, log, tes_ids)
 

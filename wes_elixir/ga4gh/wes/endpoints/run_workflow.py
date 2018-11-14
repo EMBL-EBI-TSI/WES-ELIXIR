@@ -152,7 +152,7 @@ def __init_run_document(data: Dict) -> Dict:
     document['api'] = dict()
     document['internal'] = dict()
     document['api']['request'] = data
-    document['api']['state'] = 'UNKNOWN'
+    document['api']['state'] = 'QUEUED'
     document['api']['run_log'] = dict()
     document['api']['task_logs'] = list()
     document['api']['outputs'] = dict()
