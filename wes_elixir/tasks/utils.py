@@ -14,11 +14,16 @@ logger = logging.getLogger(__name__)
 
 def set_run_state(
     collection: Collection,
-    run_id: str,
+    run_id: Optional[str] = None,
     task_id: Optional[str] = None,
     state: str = 'UNKNOWN',
-):
+) -> None:
     """Set/update state of run associated with Celery task."""
+
+    if not (task_id or run_id):
+        return None
+        # TODO: raise error
+
     if not task_id:
         document = collection.find_one(
             filter={'run_id': run_id},
@@ -30,6 +35,19 @@ def set_run_state(
         _task_id = document['task_id']
     else:
         _task_id = task_id
+
+    if not run_id:
+        document = collection.find_one(
+            filter={'task_id': task_id},
+            projection={
+                'run_id': True,
+                '_id': False,
+            }
+        )
+        _run_id = document['run_id']
+    else:
+        _run_id = run_id
+
     try:
         document = db_utils.update_run_state(
             collection=collection,
@@ -43,7 +61,7 @@ def set_run_state(
                 "(task id: '{task_id}') to state '{state}'. Original error "
                 "message: {type}: {msg}"
             ).format(
-                run_id=run_id,
+                run_id=_run_id,
                 task_id=_task_id,
                 state=state,
                 type=type(e).__name__,
@@ -57,7 +75,7 @@ def set_run_state(
                     "State of run '{run_id}' (task id: '{task_id}') "
                     "changed to '{state}'."
                 ).format(
-                    run_id=run_id,
+                    run_id=_run_id,
                     task_id=_task_id,
                     state=state,
                 )

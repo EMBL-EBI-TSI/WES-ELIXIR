@@ -512,9 +512,10 @@ def __run_workflow(
         None,
         {
             'command_list': command_list,
+            'run_id': run_id,
+            'task_id': task_id,
             'tmp_dir': tmp_dir,
         },
-        task_id=task_id,
         soft_time_limit=timeout_duration,
     )
     return None

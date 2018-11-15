@@ -8,6 +8,10 @@ from typing import (Dict, List, Optional, Tuple)
 
 from wes_elixir.celery_worker import celery
 
+from flask import current_app
+from wes_elixir.database.register_mongodb import create_mongo_client
+from wes_elixir.tasks.utils import set_run_state
+
 
 # Get logger instance
 logger = logging.getLogger(__name__)
@@ -22,12 +26,37 @@ logger = logging.getLogger(__name__)
 def task__run_workflow(
     self,
     command_list: List,
+    run_id: str,
+    task_id: str,
     tmp_dir: str
-) -> Tuple[int, List[str], List[str]]:
+) -> None:
     """Adds workflow run to task queue."""
-    # TODO: INITIALIZING....
 
-    # TODO: RUNNING
+    config = current_app.config
+    # Create MongoDB client
+    mongo = create_mongo_client(
+        app=current_app,
+        config=config,
+    )
+    collection = mongo.db['runs']
+
+    print(collection)
+
+    # Set run state to 'INITIALIZING'
+    set_run_state(
+        collection=collection,
+        run_id=run_id,
+        task_id=task_id,
+        state='INITIALIZING',
+    )
+
+    # Set run state to 'RUNNING'
+    set_run_state(
+        collection=collection,
+        run_id=run_id,
+        task_id=task_id,
+        state='RUNNING',
+    )
 
     # Execute task in background
     proc = subprocess.Popen(
@@ -40,9 +69,24 @@ def task__run_workflow(
 
     returncode = proc.wait()
 
-    # TODO: COMPLETE OR EXECUTOR ERROR
+    # Set run state to 'COMPLETE/EXECUTOR_ERROR'
+    if returncode == 0:
 
-    return (returncode, log, tes_ids)
+        set_run_state(
+            collection=collection,
+            run_id=run_id,
+            task_id=task_id,
+            state='COMPLETE',
+        )
+    else:
+        set_run_state(
+            collection=collection,
+            run_id=run_id,
+            task_id=task_id,
+            state='EXECUTOR_ERROR',
+        )
+
+    # return (returncode, log, tes_ids)
 
 
 def __process_cwl_logs(
