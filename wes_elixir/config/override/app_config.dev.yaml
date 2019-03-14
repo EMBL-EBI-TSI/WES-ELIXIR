@@ -1,10 +1,10 @@
 # General server/service settings
 server:
-    port: 7777
+    port: 8080
 
 # Security settings
 security:
-    authorization_required: True
+    authorization_required: False
 
 # Database settings
 database:
@@ -18,7 +18,8 @@ storage:
 
 # Celery task queue
 celery:
-    broker_url: 'pyamqp://rabbit:5672//'
+    broker_host: 'rabbit'
+    broker_port: 5672
 
 # OpenAPI specs
 
